@@ -63,18 +63,11 @@ openai_client_us2 = openai.AzureOpenAI(
 DEPLOYMENT_ID = "gpt-4o-audio-preview"
 
 system_prompt = """
-You are a helpful AI Transcription Assistant. Create a transcript of the provided audio
+You are a helpful AI Transcription Assistant. Create a transcript of the provided audio. 
 """
 
 # ENHANCED: Add context awareness to your user prompt
-user_prompt = """### TASKS:
-Separate the outputs of each of the 3 subtasks below with the horizontal line "\n---------------------------------------\n" and enclose the entire output in the new lines "\n#####################################################################\n":
-1. Transcribe the input_audio, enriching it with labels conveying sentiments, emotions and emphasis labels in square brackets in-line.
-2. Append to it your paralinguistic analysis in russian (non-verbal cues such as tone, pauses, etc.) output in the form of implications of emotions, emphasis or attitude to understand how things are said and provide insight into emotions, attitudes conveyed through speech patterns).
-3. Append to it the reorganised insights from this transcript, its labels and paralinguistic analysis for clarity and ease of comprehension by someone with User.
-
-IMPORTANT: If there are previous segments in this conversation, reference them when relevant and note any connections or continuations.
-"""
+user_prompt = """Identify in which language the attached input_audio is provied and transcribe the input_audio accurately in the same language. If there are previous segments in this conversation, reference them when relevant and note any connections or continuations. Only include the transcript you produced into the output formatted as plain text and nothing else."""
 
 
 def init_oauth_flow():
@@ -213,9 +206,11 @@ def create_consolidated_analysis():
     
     consolidation_prompt = """
     Analyze the complete conversation below and provide:
-    1. **Comprehensive Summary**: Key themes and progression
-    2. **Combined Paralinguistic Analysis**: Overall emotional journey 
-    3. **User-Optimized Structure**: Main points with clear hierarchy
+    1. **Combined transcrtion**: Combined transcript across all segments.
+    2. **Reorganised for clarity and ease of comprehension**: Substantive points with clear hierarchy
+    3. **Pragmatic inference**: Pragmatic inference using your knowledge as of your last training date
+    
+    For the output language use the same language as the language of the majority of the input segments.
     
     Complete Conversation:
     {combined_content}
@@ -228,33 +223,12 @@ def create_consolidated_analysis():
             {"role": "system", "content": "You are an expert conversation analyst."},
             {"role": "user", "content": consolidation_prompt.format(combined_content=combined_content)}
         ],
-#        response_format={"type": "json_object"}  # More likely to work with standard model
     )
     
     return consolidation_response.choices[0].message.content
 
-def parse_transcription_response(response_text):
-    """Parse the response using delimiters instead of JSON"""
-    sections = response_text.split("---------------------------------------")
-    
-    parsed = {
-        "transcription": "",
-        "paralinguistic_analysis": "",
-        "user_insights": ""
-    }
-    
-    if len(sections) >= 3:
-        parsed["transcription"] = sections[0].strip()
-        parsed["paralinguistic_analysis"] = sections[1].strip()
-        parsed["user_insights"] = sections[2].strip()
-    else:
-        # Fallback - return full response
-        parsed["transcription"] = response_text
-    
-    return parsed
-
-
-def main1():
+ 
+def main_debug():
     st.set_page_config(page_title="OAuth Debug Tool", page_icon="🔧")
     
     st.title("🔧 OAuth Debug Tool")
@@ -450,16 +424,26 @@ def main():
             st.session_state.messages = []
             st.session_state.messages.append({"role": "system", "content": system_prompt})
 
+
+        messages = []
+        messages.append({"role": "system", "content": system_prompt})
+        
+            # Add previous transcripts as context (not as fake conversation)
+        if st.session_state.transcription_segments:
+            context = "Previous transcript segments:\n\n"
+            for i, segment in enumerate(st.session_state.transcription_segments[-5:], 1):  # Last 5 segments
+                context += f"--- Segment {i} ---\n{segment}\n\n"
+            
+            messages.append({
+                "role": "assistant",
+                "content": context
+            })
+
+
+        
         # NEW: Display accumulated context before new recording
         if st.session_state.transcription_segments:
             st.subheader(f"📝 Previous Context ({len(st.session_state.transcription_segments)} segments)")
-            
-            # Show context summary
-        #    with st.expander("📋 View Previous Segments", expanded=False):
-        #        for i, segment in enumerate(st.session_state.transcription_segments, 1):
-        #            st.markdown(f"**--- Segment {i} ---**")
-        #            st.write(segment)
-        #            st.markdown("---")
             
             # Clear button
             if st.button("🗑️ Clear All Context"):
@@ -469,44 +453,30 @@ def main():
             
             st.markdown("---")
 
-        audio_value = st.audio_input("Ask your question!")
+        audio_value = st.audio_input("Record your note!")
 
         if audio_value:
             audio_data = audio_value.read()
             encoded_audio_string = base64.b64encode(audio_data).decode("utf-8")
             
             # NEW: Enhanced prompt with context information
-            current_segment = len(st.session_state.transcription_segments) + 1
+
             
-            # Add context to the prompt if there are previous segments
-            if st.session_state.transcription_segments:
-                context_info = f"\n\n**CONTEXT**: This is segment #{current_segment}. Previous segments contain:\n"
-                for i, segment in enumerate(st.session_state.transcription_segments, 1):
-                    # Include a summary of each previous segment
-                    preview = segment[:200] + "..." if len(segment) > 200 else segment
-                    context_info += f"Segment {i}: {preview}\n"
-                
-                enhanced_prompt = user_prompt + context_info
-            else:
-                enhanced_prompt = f"**SEGMENT #1 (First segment)**\n\n{user_prompt}"
-            
-            # MODIFIED: Use enhanced prompt instead of basic user_prompt
-            st.session_state.messages.append(
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": enhanced_prompt},  # Changed from user_prompt
-                        {
-                            "type": "input_audio",
-                            "input_audio": {"data": encoded_audio_string, "format": "wav"},
-                        }
-                    ],
-                }
-            )
+            # Add current audio request
+            messages.append({
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": user_prompt},
+                    {"type": "input_audio", "input_audio": {"data": encoded_audio_string, "format": "wav"}}
+                ]
+            })
+                    
+            st.session_state.messages = messages
             
             completion = None
 
             try:
+                current_segment = len(st.session_state.transcription_segments)+1
                 # Show which segment we're processing
                 st.info(f"🎯 Processing Segment #{current_segment}" + 
                         (f" (with context from {len(st.session_state.transcription_segments)} previous segments)" 
@@ -520,35 +490,22 @@ def main():
                 # Display the response
                 if completion and completion.choices:
                     response = completion.choices[0].message
-                    
-
-                    
-                    # Store the new segment
-                    st.session_state.transcription_segments.append(response.content)
-                    
+                                      
                     # Show success with segment number
                     st.success(f"✅ Segment #{current_segment} completed!")
                     
                     # Display current transcription
                     st.subheader(f"📝 Latest Transcription (Segment #{current_segment})")
                     st.write(response.content)
-                    # parsed_result = parse_transcription_response(response.content)
-                    # st.write (parsed_result["transcription"])
-                    # st.write (parsed_result["paralinguistic_analysis"])
-                    # st.write (parsed_result["user_insights"])
+
+                    # Store the new segment in the transcription segments hisory
+                    st.session_state.transcription_segments.append(response.content)
                                 
                     # NEW: Show context summary
                     if len(st.session_state.transcription_segments) > 1:
                         with st.expander("🔍 Context Used"):
                             st.write(f"**Previous segments**: {len(st.session_state.transcription_segments) - 1}")
-                            st.write("**Context included**: Summaries of all previous segments")
-
-                    # Add assistant response to conversation
-                    st.session_state.messages.append({
-                        "role": "assistant",
-                        "content": response.content  # Changed from list format to simple string
-                    })
-                  
+                            st.write("**Context included**: Summaries of all previous segments")               
                     
             except Exception as e:
                 print("Error in completion", e)
