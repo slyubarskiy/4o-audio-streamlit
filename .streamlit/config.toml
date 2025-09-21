@@ -3,11 +3,13 @@ headless = true
 enableCORS = false
 enableXsrfProtection = false
 enableWebsocketCompression = false
+address = "0.0.0.0"
 port = 8501
 baseUrlPath = ""
 
 [browser]
 gatherUsageStats = false
+serverAddress = "0.0.0.0"
 
 [theme]
 primaryColor = "#4285f4"
