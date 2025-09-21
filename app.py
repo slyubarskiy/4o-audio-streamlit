@@ -1,23 +1,40 @@
-# MINIMAL CHANGES to add context to your existing code
-
-# **Transcription Script** (Your existing code with MINIMAL additions)
 import dotenv
 import openai
 import os
 import streamlit as st
 import base64 
-
 import requests
 from urllib.parse import urlencode
 import jwt
 import json
+import logging
+import time
 
-import dotenv
+# Import the error handling utilities
+from api_error_utils import (
+    api_retry, circuit_breaker, with_timeout, 
+    cache_on_error, validate_response, APIError
+)
+
+# Import metrics tracking
+from api_metrics_logger import (
+    APIMetricsLogger, TranscriptionMetrics, 
+    measure_audio_metrics, log_token_usage,
+    create_performance_report
+)
+
+
+# Initial oauth_debug troubleshooting
+from oauth_debug import oauth_debug
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Load environment variables if .env exists (for local development)
 if os.path.exists('.env'):
     dotenv.load_dotenv('.env')
-    
+
 def get_config():
     """Get configuration from secrets or environment variables"""
     config = {}
@@ -50,15 +67,25 @@ def get_config():
 # Initialize configuration
 CONFIG = get_config()
 
-# OpenAI client setup
+# OpenAI client setup with connection pooling and timeout
+def create_openai_client():
+    """Create OpenAI client with error handling"""
+    try:
+        client = openai.AzureOpenAI(
+            api_key=CONFIG['AZURE_OPENAI_API_KEY_US2'],
+            api_version="2025-04-01-preview",
+            azure_endpoint=CONFIG['AZURE_OPENAI_API_ENDPOINT_US2'],
+            organization='Transcript PoC',
+            max_retries=2,  # Client-level retry
+            timeout=60.0     # Client-level timeout
+        )
+        return client
+    except Exception as e:
+        logger.error(f"Failed to create OpenAI client: {str(e)}")
+        st.error("❌ Failed to initialize AI service. Please check configuration.")
+        st.stop()
 
-openai_client_us2 = openai.AzureOpenAI(
-    api_key=CONFIG['AZURE_OPENAI_API_KEY_US2'],
-    api_version="2025-04-01-preview",
-    azure_endpoint=CONFIG['AZURE_OPENAI_API_ENDPOINT_US2'],
-    organization='Transcript PoC'
-)
-
+openai_client_us2 = create_openai_client()
 
 DEPLOYMENT_ID = "gpt-4o-audio-preview"
 
@@ -66,9 +93,16 @@ system_prompt = """
 You are a helpful AI Transcription Assistant. Create a transcript of the provided audio. 
 """
 
-# ENHANCED: Add context awareness to your user prompt
-user_prompt = """Identify in which language the attached input_audio is provied and transcribe the input_audio accurately in the same language. If there are previous segments in this conversation, reference them when relevant and note any connections or continuations. Only include the transcript you produced into the output formatted as plain text and nothing else."""
+user_prompt = """Identify in which language the attached input_audio is provided and transcribe the input_audio accurately in the same language. If there are previous segments in this conversation, reference them when relevant and note any connections or continuations. Only include the transcript you produced into the output formatted as plain text and nothing else."""
 
+def get_redirect_uri():
+    """Get appropriate redirect URI for current environment"""
+    if 'localhost' in CONFIG['APP_DOMAIN']:
+        return "http://localhost:8501"
+    else:
+        return f"https://{CONFIG['APP_DOMAIN']}"
+
+REDIRECT_URI = get_redirect_uri()
 
 def init_oauth_flow():
     """Initialize Google OAuth flow"""
@@ -84,8 +118,15 @@ def init_oauth_flow():
     auth_url = f"https://accounts.google.com/o/oauth2/auth?{urlencode(params)}"
     return auth_url
 
+@api_retry(
+    max_attempts=3,
+    initial_delay=1.0,
+    exponential_base=2.0,
+    use_streamlit_ui=True
+)
+@with_timeout(timeout_seconds=30.0)
 def exchange_code_for_token(code):
-    """Exchange authorization code for access token"""
+    """Exchange authorization code for access token with retry logic"""
     token_data = {
         'client_id': CONFIG['GOOGLE_CLIENT_ID'],
         'client_secret': CONFIG['GOOGLE_CLIENT_SECRET'],
@@ -94,23 +135,13 @@ def exchange_code_for_token(code):
         'redirect_uri': REDIRECT_URI,
     }
     
-    try:
-        response = requests.post('https://oauth2.googleapis.com/token', data=token_data)
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.RequestException as e:
-        st.error(f"Token exchange failed: {e}")
-        return None
-
-# Determine redirect URI based on environment
-def get_redirect_uri():
-    """Get appropriate redirect URI for current environment"""
-    if 'localhost' in CONFIG['APP_DOMAIN']:
-        return "http://localhost:8501"
-    else:
-        return f"https://{CONFIG['APP_DOMAIN']}"
-
-REDIRECT_URI = get_redirect_uri()
+    response = requests.post(
+        'https://oauth2.googleapis.com/token', 
+        data=token_data,
+        timeout=10.0  # Request-level timeout
+    )
+    response.raise_for_status()
+    return response.json()
 
 def verify_user_email(id_token):
     """Verify user's email from Google ID token"""
@@ -123,18 +154,12 @@ def verify_user_email(id_token):
         
         email = payload.get('email')
         return email == CONFIG['AUTHORIZED_EMAIL']
-    except:
+    except Exception as e:
+        logger.error(f"Email verification failed: {str(e)}")
         return False
 
 def authenticate_with_gmail():
-    """Main authentication function"""
-    
-    # Debug information (only show in development)
-    if 'localhost' in REDIRECT_URI and st.sidebar.button("🔧 Debug OAuth Config"):
-        st.sidebar.write("**OAuth Configuration:**")
-        st.sidebar.write(f"Client ID: {CONFIG['GOOGLE_CLIENT_ID'][:20]}...")
-        st.sidebar.write(f"Redirect URI: {REDIRECT_URI}")
-        st.sidebar.write(f"Authorized Email: {CONFIG['AUTHORIZED_EMAIL']}")
+    """Main authentication function with error handling"""
     
     # Check if already authenticated
     if st.session_state.get('authenticated', False):
@@ -145,20 +170,28 @@ def authenticate_with_gmail():
     if 'code' in query_params:
         st.info("🔄 Processing authentication...")
         code = query_params['code']
-        token_response = exchange_code_for_token(code)
         
-        if token_response and 'id_token' in token_response:
-            if verify_user_email(token_response['id_token']):
-                st.session_state.authenticated = True
-                st.session_state.user_email = CONFIG['AUTHORIZED_EMAIL']
-                st.query_params.clear()
-                st.success("✅ Authentication successful!")
-                st.rerun()
+        try:
+            token_response = exchange_code_for_token(code)
+            
+            if token_response and 'id_token' in token_response:
+                if verify_user_email(token_response['id_token']):
+                    st.session_state.authenticated = True
+                    st.session_state.user_email = CONFIG['AUTHORIZED_EMAIL']
+                    st.query_params.clear()
+                    st.success("✅ Authentication successful!")
+                    st.rerun()
+                else:
+                    st.error("❌ Access denied. Only authorized email can access this app.")
+                    return False
             else:
-                st.error("❌ Access denied. Only authorized email can access this app.")
-                return False
-        else:
-            st.error("❌ Authentication failed. Please try again.")
+                st.error("❌ Authentication failed. Please try again.")
+        except APIError as e:
+            st.error(f"❌ Authentication service error: {str(e)}")
+            st.info("Please try again in a few moments.")
+        except Exception as e:
+            logger.error(f"Unexpected auth error: {str(e)}")
+            st.error("❌ Authentication failed. Please contact support if this persists.")
     
     # Handle OAuth errors
     if 'error' in query_params:
@@ -194,9 +227,89 @@ def authenticate_with_gmail():
         return False
     
     return True
+
+@api_retry(
+    max_attempts=3,
+    initial_delay=2.0,
+    max_delay=10.0,
+    use_streamlit_ui=True
+)
+@validate_response(
+    validator=lambda x: x and x.choices and x.choices[0].message.content,
+    error_message="Invalid transcription response"
+)
+def transcribe_audio(messages, deployment_id=DEPLOYMENT_ID, segment_id=0, audio_metrics=None):
+    """Transcribe audio with robust error handling and metrics tracking"""
+    start_time = time.time()
     
+    try:
+        completion = openai_client_us2.chat.completions.create(
+            model=deployment_id,
+            messages=messages,
+            timeout=60  # Add explicit timeout
+        )
+        
+        # Extract token usage
+        token_usage = log_token_usage(completion)
+        
+        # Log successful transcription metrics
+        if 'metrics_logger' in st.session_state and audio_metrics:
+            metrics = TranscriptionMetrics(
+                segment_id=segment_id,
+                timestamp=time.time(),
+                audio_size_bytes=audio_metrics.get('size_bytes', 0),
+                audio_duration_estimate=audio_metrics.get('duration_seconds', 0),
+                encoded_size_bytes=audio_metrics.get('encoded_size', 0),
+                encoding_time=audio_metrics.get('encoding_time', 0),
+                api_call_time=time.time() - start_time,
+                total_time=time.time() - audio_metrics.get('start_time', start_time),
+                prompt_tokens=token_usage.get('prompt_tokens', 0),
+                completion_tokens=token_usage.get('completion_tokens', 0),
+                total_tokens=token_usage.get('total_tokens', 0),
+                model=deployment_id,
+                status='success',
+                context_segments_used=len(messages) - 2,  # Excluding system and current user message
+                response_length=len(completion.choices[0].message.content)
+            )
+            st.session_state.metrics_logger.log_transcription(metrics)
+        
+        return completion
+        
+    except Exception as e:
+        # Log failed transcription metrics
+        if 'metrics_logger' in st.session_state and audio_metrics:
+            metrics = TranscriptionMetrics(
+                segment_id=segment_id,
+                timestamp=time.time(),
+                audio_size_bytes=audio_metrics.get('size_bytes', 0),
+                audio_duration_estimate=audio_metrics.get('duration_seconds', 0),
+                encoded_size_bytes=audio_metrics.get('encoded_size', 0),
+                encoding_time=audio_metrics.get('encoding_time', 0),
+                api_call_time=time.time() - start_time,
+                total_time=time.time() - audio_metrics.get('start_time', start_time),
+                prompt_tokens=0,
+                completion_tokens=0,
+                total_tokens=0,
+                model=deployment_id,
+                status='error',
+                error_type=type(e).__name__,
+                context_segments_used=len(messages) - 2
+            )
+            st.session_state.metrics_logger.log_transcription(metrics)
+        
+        raise
+
+@api_retry(
+    max_attempts=2,
+    initial_delay=1.0,
+    use_streamlit_ui=True
+)
+@cache_on_error(cache_key="consolidated_analysis", ttl_seconds=1800)
 def create_consolidated_analysis():
-    """Separate function for consolidated analysis using gpt-4o"""
+    """Create consolidated analysis with error handling and caching"""
+    
+    if not st.session_state.transcription_segments:
+        return "No segments to analyze"
     
     # Compile all segments
     combined_content = "\n\n".join([
@@ -206,7 +319,7 @@ def create_consolidated_analysis():
     
     consolidation_prompt = """
     Analyze the complete conversation below and provide:
-    1. **Combined transcrtion**: Combined transcript across all segments.
+    1. **Combined transcription**: Combined transcript across all segments.
     2. **Reorganised for clarity and ease of comprehension**: Substantive points with clear hierarchy
     3. **Pragmatic inference**: Pragmatic inference using your knowledge as of your last training date
     
@@ -216,189 +329,90 @@ def create_consolidated_analysis():
     {combined_content}
     """
     
-    # Use regular gpt-4o model for consolidation
-    consolidation_response = openai_client_us2.chat.completions.create(
-        model="gpt-4o",  # Use standard model
-        messages=[
-            {"role": "system", "content": "You are an expert conversation analyst."},
-            {"role": "user", "content": consolidation_prompt.format(combined_content=combined_content)}
-        ],
-    )
+    try:
+        # Use regular gpt-4o model for consolidation
+        consolidation_response = openai_client_us2.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "You are an expert conversation analyst."},
+                {"role": "user", "content": consolidation_prompt.format(combined_content=combined_content)}
+            ],
+            timeout=45
+        )
+        
+        return consolidation_response.choices[0].message.content
     
-    return consolidation_response.choices[0].message.content
+    except openai.RateLimitError:
+        st.warning("⚠️ Rate limit reached. Please wait a moment before retrying.")
+        raise
+    except Exception as e:
+        logger.error(f"Consolidation failed: {str(e)}")
+        # Return a basic consolidation as fallback
+        return f"**Basic Transcript Compilation**\n\n{combined_content}"
 
- 
-def main_debug():
-    st.set_page_config(page_title="OAuth Debug Tool", page_icon="🔧")
+def handle_transcription_error(error: Exception, segment_num: int):
+    """Centralized error handling for transcription failures"""
+    error_messages = {
+        "rate_limit": "You've reached the usage limit. Please wait a few moments.",
+        "timeout": "The transcription took too long. Please try a shorter recording.",
+        "auth": "Authentication issue. Please log out and log in again.",
+        "connection": "Connection issue. Please check your internet connection.",
+    }
     
-    st.title("🔧 OAuth Debug Tool")
+    # Store error in session state for debugging
+    if 'error_log' not in st.session_state:
+        st.session_state.error_log = []
     
-    # Show current configuration
-    st.markdown("### 📋 Current Configuration")
+    st.session_state.error_log.append({
+        'segment': segment_num,
+        'error': str(error),
+        'timestamp': time.time()
+    })
     
-    col1, col2 = st.columns(2)
+    # Determine error type and show appropriate message
+    for error_type, message in error_messages.items():
+        if error_type in str(error).lower():
+            st.error(f"❌ Segment #{segment_num} failed: {message}")
+            return
     
-    with col1:
-        st.markdown("**App Configuration:**")
-        st.code(f"""
-Client ID: {CONFIG.get('GOOGLE_CLIENT_ID', 'MISSING')[:30]}...
-App Domain: {CONFIG.get('APP_DOMAIN', 'MISSING')}
-Redirect URI: {REDIRECT_URI}
-Authorized Email: {CONFIG.get('AUTHORIZED_EMAIL', 'MISSING')}
-        """)
+    # Generic error message
+    st.error(f"❌ Segment #{segment_num} failed: Please try again")
     
-    with col2:
-        st.markdown("**Current Request Info:**")
-        
-        # Get current URL info
-        query_params = dict(st.query_params)
-        
-        st.code(f"""
-Current URL: {st.context.request.url if hasattr(st.context, 'request') else 'Unknown'}
-Query Params: {query_params}
-        """)
-    
-    # Show what to add to Google OAuth
-    st.markdown("### 🔗 Google OAuth Configuration")
-    st.info("Add BOTH of these URLs to your Google OAuth Client:")
-    
-    st.code(f"""
-Authorized redirect URIs:
-1. {REDIRECT_URI}
-2. {REDIRECT_URI}/
-    """)
-    
-    # Test OAuth flow
-    st.markdown("### 🧪 Test OAuth Flow")
-    
-    # Check for OAuth response
-    if 'code' in st.query_params:
-        st.success("✅ OAuth callback received!")
-        code = st.query_params['code']
-        st.write(f"**Authorization Code**: {code[:50]}...")
-        
-        # Test token exchange
-        if st.button("🔄 Test Token Exchange"):
-            with st.spinner("Testing token exchange..."):
-                token_data = {
-                    'client_id': CONFIG['GOOGLE_CLIENT_ID'],
-                    'client_secret': CONFIG['GOOGLE_CLIENT_SECRET'],
-                    'code': code,
-                    'grant_type': 'authorization_code',
-                    'redirect_uri': REDIRECT_URI,
-                }
-                
-                try:
-                    response = requests.post('https://oauth2.googleapis.com/token', data=token_data)
-                    st.write(f"**Response Status**: {response.status_code}")
-                    
-                    if response.status_code == 200:
-                        token_response = response.json()
-                        st.success("✅ Token exchange successful!")
-                        
-                        if 'id_token' in token_response:
-                            # Decode ID token
-                            id_token = token_response['id_token']
-                            payload_part = id_token.split('.')[1]
-                            payload_part += '=' * (4 - len(payload_part) % 4)
-                            payload = json.loads(base64.urlsafe_b64decode(payload_part))
-                            
-                            st.write(f"**User Email**: {payload.get('email')}")
-                            st.write(f"**Authorized Email**: {CONFIG['AUTHORIZED_EMAIL']}")
-                            
-                            if payload.get('email') == CONFIG['AUTHORIZED_EMAIL']:
-                                st.success("✅ Email authorization successful!")
-                            else:
-                                st.error("❌ Email not authorized")
-                        else:
-                            st.error("❌ No ID token in response")
-                            st.json(token_response)
-                    else:
-                        st.error(f"❌ Token exchange failed: {response.status_code}")
-                        st.json(response.json())
-                        
-                except Exception as e:
-                    st.error(f"❌ Token exchange error: {e}")
-    
-    elif 'error' in st.query_params:
-        st.error(f"❌ OAuth Error: {st.query_params['error']}")
-        if 'error_description' in st.query_params:
-            st.write(f"**Description**: {st.query_params['error_description']}")
-        
-        st.markdown("### 🔍 Common Solutions:")
-        st.markdown("""
-        - **403 Forbidden**: Check OAuth consent screen test users
-        - **redirect_uri_mismatch**: Update Google OAuth redirect URIs
-        - **unauthorized_client**: Check client ID and secret
-        """)
-    
-    else:
-        # Show OAuth URL
-        if CONFIG.get('GOOGLE_CLIENT_ID'):
-            params = {
-                'client_id': CONFIG['GOOGLE_CLIENT_ID'],
-                'redirect_uri': REDIRECT_URI,
-                'scope': 'openid email profile',
-                'response_type': 'code',
-                'access_type': 'offline',
-                'prompt': 'consent',
-                'include_granted_scopes': 'true'
-            }
-            
-            auth_url = f"https://accounts.google.com/o/oauth2/v2/auth?{urlencode(params)}"
-            
-            st.markdown("### 🚀 Test OAuth Flow")
-            
-            # Show the auth URL for manual inspection
-            with st.expander("🔍 Inspect OAuth URL"):
-                st.code(auth_url)
-            
-            st.markdown(f"""
-            <a href="{auth_url}" target="_self">
-                <button style="
-                    background-color: #4285f4;
-                    color: white;
-                    padding: 12px 24px;
-                    border: none;
-                    border-radius: 4px;
-                    cursor: pointer;
-                    font-size: 16px;
-                    text-decoration: none;
-                    display: inline-block;
-                ">
-                    🔐 Test Google OAuth
-                </button>
-            </a>
-            """, unsafe_allow_html=True)
-        else:
-            st.error("❌ Google Client ID not configured")
-    
-    # Configuration checklist
-    st.markdown("### ✅ Configuration Checklist")
-    
-    checklist = [
-        ("Google Client ID configured", bool(CONFIG.get('GOOGLE_CLIENT_ID'))),
-        ("Google Client Secret configured", bool(CONFIG.get('GOOGLE_CLIENT_SECRET'))),
-        ("Authorized email configured", bool(CONFIG.get('AUTHORIZED_EMAIL'))),
-        ("App domain configured", bool(CONFIG.get('APP_DOMAIN'))),
-    ]
-    
-    for item, status in checklist:
-        if status:
-            st.success(f"✅ {item}")
-        else:
-            st.error(f"❌ {item}")
-
+    # Show debug info in expander
+    with st.expander("🐛 Debug Information"):
+        st.code(str(error))
 
 def main():
-    """Main application"""
-
-    # -------------------auth
-
+    """Main application with comprehensive error handling and metrics"""
+    
     st.set_page_config(page_title="Secure Transcription App", page_icon="🔐")
-
-    # Choose authentication method
-    # Show logout option
+    
+    # Initialize metrics logger
+    if 'metrics_logger' not in st.session_state:
+        st.session_state.metrics_logger = APIMetricsLogger()
+    
+    # Display metrics dashboard in sidebar
+    st.session_state.metrics_logger.display_metrics_dashboard()
+    
+    # System health check
+    if 'health_check_time' not in st.session_state or \
+       time.time() - st.session_state.get('health_check_time', 0) > 300:
+        try:
+            # Quick health check
+            test_completion = openai_client_us2.chat.completions.create(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": "test"}],
+                max_tokens=1,
+                timeout=5
+            )
+            st.session_state.health_check_time = time.time()
+            st.session_state.api_healthy = True
+        except Exception as e:
+            st.session_state.api_healthy = False
+            st.warning("⚠️ AI service may be experiencing issues. Some features might be slow.")
+            logger.error(f"Health check failed: {str(e)}")
+    
+    # Authentication
     if authenticate_with_gmail():
         col1, col2 = st.columns([3, 1])
         with col2:
@@ -407,62 +421,108 @@ def main():
                     if key in st.session_state:
                         del st.session_state[key]
                 st.rerun()
-
+        
         with col1:
             st.title("🎙️ Transcription App")
             st.success(f"✅ Authenticated as: {CONFIG['AUTHORIZED_EMAIL']}")
-
-        # ------------------- auth end
-
-        st.title("Test Assistant")
-
-
+        
+        # Show API health status
+        if st.session_state.get('api_healthy', True):
+            st.sidebar.success("✅ System Status: Healthy")
+        else:
+            st.sidebar.warning("⚠️ System Status: Degraded")
+        
+        # Performance report generation
+        if st.sidebar.button("📈 Generate Performance Report"):
+            report = create_performance_report()
+            st.sidebar.download_button(
+                "📥 Download Report",
+                report,
+                file_name=f"performance_report_{time.strftime('%Y%m%d_%H%M%S')}.md",
+                mime="text/markdown"
+            )
+        
+        # Error log in sidebar (for debugging)
+        if st.sidebar.checkbox("Show Error Log") and 'error_log' in st.session_state:
+            st.sidebar.json(st.session_state.error_log[-5:])  # Show last 5 errors
+        
+        # Initialize session state
         if 'transcription_segments' not in st.session_state:
             st.session_state.transcription_segments = []
-
+        
         if 'messages' not in st.session_state:
             st.session_state.messages = []
             st.session_state.messages.append({"role": "system", "content": system_prompt})
-
-
-        messages = []
-        messages.append({"role": "system", "content": system_prompt})
         
-            # Add previous transcripts as context (not as fake conversation)
-        if st.session_state.transcription_segments:
-            context = "Previous transcript segments:\n\n"
-            for i, segment in enumerate(st.session_state.transcription_segments[-5:], 1):  # Last 5 segments
-                context += f"--- Segment {i} ---\n{segment}\n\n"
-            
-            messages.append({
-                "role": "assistant",
-                "content": context
-            })
-
-
-        
-        # NEW: Display accumulated context before new recording
+        # Display accumulated context
         if st.session_state.transcription_segments:
             st.subheader(f"📝 Previous Context ({len(st.session_state.transcription_segments)} segments)")
             
-            # Clear button
-            if st.button("🗑️ Clear All Context"):
-                st.session_state.transcription_segments = []
-                st.session_state.messages = [{"role": "system", "content": system_prompt}]
-                st.rerun()
+            # Show total audio processed
+            if 'metrics_logger' in st.session_state:
+                metrics_summary = st.session_state.metrics_logger.get_current_session_metrics()
+                if metrics_summary:
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Total Audio", f"{metrics_summary.get('total_audio_mb', 0):.1f} MB")
+                    with col2:
+                        st.metric("Total Tokens", f"{metrics_summary.get('total_tokens', 0):,}")
+                    with col3:
+                        st.metric("Est. Cost", f"${metrics_summary.get('estimated_cost', 0):.3f}")
+            
+            # Clear button with confirmation
+            col1, col2 = st.columns([1, 5])
+            with col1:
+                if st.button("🗑️ Clear All"):
+                    if st.checkbox("Confirm clear?"):
+                        st.session_state.transcription_segments = []
+                        st.session_state.messages = [{"role": "system", "content": system_prompt}]
+                        st.rerun()
             
             st.markdown("---")
-
+        
+        # Audio input
         audio_value = st.audio_input("Record your note!")
-
+        
         if audio_value:
+            # Track overall processing start time
+            processing_start = time.time()
+            
+            # Read and measure audio data
             audio_data = audio_value.read()
+            audio_metrics = measure_audio_metrics(audio_data)
+            
+            # Encode audio (track encoding time)
+            encoding_start = time.time()
             encoded_audio_string = base64.b64encode(audio_data).decode("utf-8")
+            encoding_time = time.time() - encoding_start
             
-            # NEW: Enhanced prompt with context information
-
+            # Add metrics to audio_metrics dict
+            audio_metrics['encoded_size'] = len(encoded_audio_string)
+            audio_metrics['encoding_time'] = encoding_time
+            audio_metrics['start_time'] = processing_start
             
-            # Add current audio request
+            # Log audio metrics
+            logger.info(f"Audio metrics: Size={audio_metrics['size_kb']:.1f}KB, "
+                       f"Duration={audio_metrics['duration_seconds']:.1f}s, "
+                       f"Encoding time={encoding_time:.3f}s")
+            
+            # Build messages with context
+            messages = []
+            messages.append({"role": "system", "content": system_prompt})
+            
+            # Add previous context
+            if st.session_state.transcription_segments:
+                context = "Previous transcript segments:\n\n"
+                for i, segment in enumerate(st.session_state.transcription_segments[-5:], 1):
+                    context += f"--- Segment {i} ---\n{segment}\n\n"
+                
+                messages.append({
+                    "role": "assistant",
+                    "content": context
+                })
+            
+            # Add current audio
             messages.append({
                 "role": "user",
                 "content": [
@@ -470,87 +530,135 @@ def main():
                     {"type": "input_audio", "input_audio": {"data": encoded_audio_string, "format": "wav"}}
                 ]
             })
-                    
+            
             st.session_state.messages = messages
             
-            completion = None
-
-            try:
-                current_segment = len(st.session_state.transcription_segments)+1
-                # Show which segment we're processing
-                st.info(f"🎯 Processing Segment #{current_segment}" + 
-                        (f" (with context from {len(st.session_state.transcription_segments)} previous segments)" 
-                         if st.session_state.transcription_segments else " (first segment)"))
-                
-                completion = openai_client_us2.chat.completions.create(
-                    model=DEPLOYMENT_ID,
-                    messages=st.session_state.messages,  # This includes all previous context
-                )
+            # Process transcription
+            current_segment = len(st.session_state.transcription_segments) + 1
             
-                # Display the response
+            # Show audio info
+            st.info(f"🎯 Processing Segment #{current_segment}\n"
+                   f"📊 Audio: {audio_metrics['size_kb']:.1f}KB, {audio_metrics['duration_seconds']:.1f}s" + 
+                   (f"\n📝 Context: {len(st.session_state.transcription_segments)} previous segments" 
+                    if st.session_state.transcription_segments else ""))
+            
+            try:
+                # Transcribe with error handling and metrics
+                completion = transcribe_audio(
+                    st.session_state.messages,
+                    segment_id=current_segment,
+                    audio_metrics=audio_metrics
+                )
+                
                 if completion and completion.choices:
                     response = completion.choices[0].message
-                                      
-                    # Show success with segment number
-                    st.success(f"✅ Segment #{current_segment} completed!")
                     
-                    # Display current transcription
+                    # Calculate total processing time
+                    total_time = time.time() - processing_start
+                    
+                    st.success(f"✅ Segment #{current_segment} completed in {total_time:.1f}s!")
+                    
+                    # Display transcription
                     st.subheader(f"📝 Latest Transcription (Segment #{current_segment})")
                     st.write(response.content)
-
-                    # Store the new segment in the transcription segments hisory
+                    
+                    # Store segment
                     st.session_state.transcription_segments.append(response.content)
-                                
-                    # NEW: Show context summary
+                    
+                    # Show performance metrics
+                    if 'metrics_logger' in st.session_state:
+                        with st.expander("📊 Segment Performance Metrics"):
+                            latest_metrics = st.session_state.api_metrics_log[-1] if 'api_metrics_log' in st.session_state else {}
+                            if latest_metrics:
+                                col1, col2, col3 = st.columns(3)
+                                with col1:
+                                    st.metric("API Latency", f"{latest_metrics.get('api_call_time', 0):.2f}s")
+                                    st.metric("Tokens Used", f"{latest_metrics.get('total_tokens', 0):,}")
+                                with col2:
+                                    st.metric("Processing Rate", f"{latest_metrics.get('tokens_per_second', 0):.1f} tok/s")
+                                    st.metric("Audio/Process Ratio", f"{latest_metrics.get('audio_duration_estimate', 0) / max(latest_metrics.get('api_call_time', 1), 0.1):.1f}x")
+                                with col3:
+                                    st.metric("Cost", f"${latest_metrics.get('cost_estimate', 0):.4f}")
+                                    st.metric("Response Length", f"{latest_metrics.get('response_length', 0):,} chars")
+                    
+                    # Show context summary
                     if len(st.session_state.transcription_segments) > 1:
                         with st.expander("🔍 Context Used"):
                             st.write(f"**Previous segments**: {len(st.session_state.transcription_segments) - 1}")
-                            st.write("**Context included**: Summaries of all previous segments")               
-                    
+                            st.write("**Context included**: Last 5 segments")
+                
+            except APIError as e:
+                handle_transcription_error(e, current_segment)
+                
+                # Offer to save partial progress
+                if st.session_state.transcription_segments:
+                    if st.button("💾 Save partial transcript"):
+                        combined = "\n\n".join(st.session_state.transcription_segments)
+                        st.download_button(
+                            "📥 Download",
+                            combined,
+                            file_name=f"partial_transcript_{current_segment-1}_segments.txt",
+                            mime="text/plain"
+                        )
+                        
             except Exception as e:
-                print("Error in completion", e)
-                st.write("Error in completion", e)
-                st.stop()
-
-
-        # NEW: Show accumulated conversation at the bottom
+                logger.error(f"Unexpected error in transcription: {str(e)}")
+                handle_transcription_error(e, current_segment)
+        
+        # Show accumulated conversation
         if len(st.session_state.transcription_segments) > 1:
             st.markdown("---")
-        #    st.subheader("📜 Full Conversation")
             
             combined_transcript = ""
             for i, segment in enumerate(st.session_state.transcription_segments, 1):
                 combined_transcript += f"\n\n--- Segment {i} ---\n\n{segment}"
             
-        #    st.text_area("Complete Transcript", combined_transcript, height=300)
-
-        #    # Add consolidation section
-
-        #    st.markdown("---")
-            
-            # Consolidation expander
+            # Consolidation with error handling
             with st.expander("🧠 Consolidated Analysis", expanded=False):
                 if st.button("🔄 Generate Consolidated Analysis"):
                     with st.spinner("Analyzing complete conversation..."):
-                        consolidated = create_consolidated_analysis()
-                        st.session_state.consolidated_analysis = consolidated
+                        try:
+                            consolidated = create_consolidated_analysis()
+                            st.session_state.consolidated_analysis = consolidated
+                            st.session_state.consolidation_timestamp = time.time()
+                        except Exception as e:
+                            st.error("Failed to generate analysis. Using basic compilation.")
+                            st.session_state.consolidated_analysis = combined_transcript
                 
                 if hasattr(st.session_state, 'consolidated_analysis'):
+                    # Show cache age if applicable
+                    if hasattr(st.session_state, 'consolidation_timestamp'):
+                        age = time.time() - st.session_state.consolidation_timestamp
+                        if age > 60:
+                            st.caption(f"Generated {age/60:.0f} minutes ago")
+                    
                     st.write(st.session_state.consolidated_analysis)
             
-            # Individual segments expander  
+            # Individual segments
             with st.expander("📋 Individual Segments", expanded=False):
                 for i, segment in enumerate(st.session_state.transcription_segments, 1):
                     st.markdown(f"**--- Segment {i} ---**")
                     st.write(segment)
-           
-            # Download option
-            st.download_button(
-                "📥 Download Full Transcript",
-                combined_transcript,
-                file_name="full_transcript.txt",
-                mime="text/plain"
-            )
+            
+            # Download with error handling
+            try:
+                st.download_button(
+                    "📥 Download Full Transcript",
+                    combined_transcript,
+                    file_name="full_transcript.txt",
+                    mime="text/plain"
+                )
+            except Exception as e:
+                st.error("Download failed. Copy text manually if needed.")
+                st.text_area("Manual Copy", combined_transcript, height=200)
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        logger.critical(f"Critical application error: {str(e)}")
+        st.error("🚨 Critical Error: The application encountered an unexpected error.")
+        st.info("Please refresh the page or contact support if this persists.")
+        
+        if st.checkbox("Show technical details"):
+            st.exception(e)
