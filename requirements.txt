@@ -4,3 +4,8 @@ python-dotenv
 requests
 PyJWT
 watchdog
+soundfile
+librosa
+resampy
+numpy
+ffmpeg-python

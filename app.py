@@ -2,17 +2,26 @@ import dotenv
 import openai
 import os
 import streamlit as st
-import base64 
+import base64
 import requests
 from urllib.parse import urlencode
 import jwt
 import json
 import logging
 import time
+import io
+import wave
+import numpy as np
+import soundfile as sf
+import librosa
+
+# Import audio processing configuration and functions
+import audio_config
+from audio_processor import resample_audio_auto
 
 # Import the error handling utilities
 from api_error_utils import (
-    api_retry, circuit_breaker, with_timeout, 
+    api_retry, circuit_breaker, with_timeout,
     cache_on_error, validate_response, APIError
 )
 
@@ -51,7 +60,7 @@ def get_config():
     config['AZURE_OPENAI_API_ENDPOINT_US2'] = get_secret('AZURE_OPENAI_API_ENDPOINT_US2')
     config['AZURE_OPENAI_API_KEY_US2'] = get_secret('AZURE_OPENAI_API_KEY_US2')
     config['AUTHORIZED_EMAIL'] = get_secret('AUTHORIZED_EMAIL', 'sergeyly@gmail.com')
-    config['APP_DOMAIN'] = get_secret('APP_DOMAIN', 'localhost:8501')
+    config['APP_DOMAIN'] = get_secret('APP_DOMAIN', 'localhost:8080')
     
     # Validate required secrets
     required_keys = ['GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'AZURE_OPENAI_API_KEY_US2']
@@ -88,12 +97,117 @@ def create_openai_client():
 openai_client_us2 = create_openai_client()
 
 DEPLOYMENT_ID = "gpt-4o-audio-preview"
+TARGET_SAMPLE_RATE = audio_config.TARGET_SAMPLE_RATE  # From configuration
 
 system_prompt = """
-You are a helpful AI Transcription Assistant. Create a transcript of the provided audio. 
+You are a helpful AI Transcription Assistant. Create a transcript of the provided audio.
 """
 
-user_prompt = """Identify in which language the attached input_audio is provided and transcribe the input_audio accurately in the same language. If there are previous segments in this conversation, reference them when relevant and note any connections or continuations. Only include the transcript you produced into the output formatted as plain text and nothing else."""
+user_prompt = """Identify in which language the attached input_audio is provided and transcribe the input_audio accurately in the same language (expected in Russian but possibly in English). If there are previous segments in this conversation, reference them when relevant and note any connections or continuations. Only include the transcript you produced into the output formatted as plain text and nothing else."""
+
+def resample_audio(audio_data: bytes, target_sr: int = TARGET_SAMPLE_RATE, force_mono: bool = True) -> tuple[bytes, dict]:
+    """
+    Resample audio data to target sample rate and optionally convert to mono
+
+    Args:
+        audio_data: Raw WAV audio bytes
+        target_sr: Target sample rate (default 16000 Hz)
+        force_mono: Convert multi-channel audio to mono (default True)
+
+    Returns:
+        Tuple of (resampled_audio_bytes, resample_metrics)
+    """
+    resample_start = time.time()
+    resample_metrics = {
+        'original_sample_rate': None,
+        'target_sample_rate': target_sr,
+        'resample_time': 0,
+        'resampled': False,
+        'original_size': len(audio_data),
+        'resampled_size': None,
+        'original_channels': None,
+        'converted_to_mono': False
+    }
+
+    try:
+        # Read the audio data from bytes
+        audio_io = io.BytesIO(audio_data)
+
+        # Read audio with soundfile to get the sample rate and data
+        audio_array, original_sr = sf.read(audio_io, dtype='float32')
+        resample_metrics['original_sample_rate'] = original_sr
+
+        # Determine number of channels
+        if len(audio_array.shape) > 1:
+            num_channels = audio_array.shape[1]
+            resample_metrics['original_channels'] = num_channels
+        else:
+            num_channels = 1
+            resample_metrics['original_channels'] = 1
+
+        logger.info(f"Original audio: sample_rate={original_sr} Hz, channels={num_channels}, shape={audio_array.shape}")
+
+        # Convert to mono if multi-channel and force_mono is True
+        if force_mono and num_channels > 1:
+            logger.info(f"Converting {num_channels}-channel audio to mono")
+            # Average all channels to create mono
+            audio_array = np.mean(audio_array, axis=1)
+            resample_metrics['converted_to_mono'] = True
+
+        # Check if resampling is needed
+        needs_resampling = original_sr != target_sr
+
+        if not needs_resampling and not resample_metrics['converted_to_mono']:
+            logger.info(f"Audio already at target sample rate {target_sr} Hz and mono, skipping processing")
+            resample_metrics['resample_time'] = time.time() - resample_start
+            resample_metrics['resampled_size'] = len(audio_data)
+            return audio_data, resample_metrics
+
+        # Resample if needed
+        if needs_resampling:
+            # Single channel audio (or already converted to mono)
+            resampled_audio = librosa.resample(
+                audio_array,
+                orig_sr=original_sr,
+                target_sr=target_sr,
+                res_type='kaiser_best'  # High quality resampling
+            )
+            resample_metrics['resampled'] = True
+        else:
+            # No resampling needed, just use the mono-converted audio
+            resampled_audio = audio_array
+            target_sr = original_sr  # Keep original sample rate
+
+        # Convert back to WAV bytes
+        output_io = io.BytesIO()
+        sf.write(output_io, resampled_audio, target_sr, format='WAV', subtype='PCM_16')
+        resampled_bytes = output_io.getvalue()
+
+        # Update metrics
+        resample_metrics['resampled'] = True
+        resample_metrics['resampled_size'] = len(resampled_bytes)
+        resample_metrics['resample_time'] = time.time() - resample_start
+
+        # Log the conversion
+        size_reduction = (1 - len(resampled_bytes) / len(audio_data)) * 100
+        conversion_info = []
+        if resample_metrics['resampled']:
+            conversion_info.append(f"{original_sr} Hz → {target_sr} Hz")
+        if resample_metrics['converted_to_mono']:
+            conversion_info.append(f"{resample_metrics['original_channels']} ch → mono")
+
+        logger.info(f"Audio processed: {', '.join(conversion_info)}, "
+                   f"Size: {len(audio_data)/1024:.1f} KB → {len(resampled_bytes)/1024:.1f} KB "
+                   f"({size_reduction:.1f}% reduction), Time: {resample_metrics['resample_time']:.3f}s")
+
+        return resampled_bytes, resample_metrics
+
+    except Exception as e:
+        logger.error(f"Audio resampling failed: {str(e)}, using original audio")
+        resample_metrics['resample_time'] = time.time() - resample_start
+        resample_metrics['error'] = str(e)
+        # Return original audio if resampling fails
+        return audio_data, resample_metrics
 
 def get_redirect_uri():
     """Get appropriate redirect URI for current environment"""
@@ -269,7 +383,12 @@ def transcribe_audio(messages, deployment_id=DEPLOYMENT_ID, segment_id=0, audio_
                 model=deployment_id,
                 status='success',
                 context_segments_used=len(messages) - 2,  # Excluding system and current user message
-                response_length=len(completion.choices[0].message.content)
+                response_length=len(completion.choices[0].message.content),
+                original_sample_rate=audio_metrics.get('original_sample_rate'),
+                target_sample_rate=TARGET_SAMPLE_RATE if audio_metrics.get('resampled') else None,
+                resampled=audio_metrics.get('resampled', False),
+                resample_time=audio_metrics.get('resample_time', 0),
+                resampled_size_bytes=audio_metrics.get('resampled_size_bytes')
             )
             st.session_state.metrics_logger.log_transcription(metrics)
         
@@ -293,7 +412,12 @@ def transcribe_audio(messages, deployment_id=DEPLOYMENT_ID, segment_id=0, audio_
                 model=deployment_id,
                 status='error',
                 error_type=type(e).__name__,
-                context_segments_used=len(messages) - 2
+                context_segments_used=len(messages) - 2,
+                original_sample_rate=audio_metrics.get('original_sample_rate'),
+                target_sample_rate=TARGET_SAMPLE_RATE if audio_metrics.get('resampled') else None,
+                resampled=audio_metrics.get('resampled', False),
+                resample_time=audio_metrics.get('resample_time', 0),
+                resampled_size_bytes=audio_metrics.get('resampled_size_bytes')
             )
             st.session_state.metrics_logger.log_transcription(metrics)
         
@@ -413,7 +537,7 @@ def main():
             logger.error(f"Health check failed: {str(e)}")
     
     # Authentication
-    if authenticate_with_gmail():
+    if ('localhost' in CONFIG['APP_DOMAIN']) | authenticate_with_gmail():
         col1, col2 = st.columns([3, 1])
         with col2:
             if st.button("🚪 Logout"):
@@ -487,14 +611,33 @@ def main():
         if audio_value:
             # Track overall processing start time
             processing_start = time.time()
-            
+
             # Read and measure audio data
             audio_data = audio_value.read()
             audio_metrics = measure_audio_metrics(audio_data)
-            
-            # Encode audio (track encoding time)
+
+            # Resample audio to optimal sample rate for GPT-4o using configured backend
+            resampled_audio, resample_metrics = resample_audio_auto(audio_data, TARGET_SAMPLE_RATE)
+
+            # Update metrics with resampling info
+            audio_metrics['original_sample_rate'] = resample_metrics.get('original_sample_rate')
+            audio_metrics['resampled'] = resample_metrics.get('resampled', False)
+            audio_metrics['resample_time'] = resample_metrics.get('resample_time', 0)
+            audio_metrics['backend'] = resample_metrics.get('backend', 'unknown')
+            audio_metrics['converted_to_mono'] = resample_metrics.get('converted_to_mono', False)
+
+            # If resampled, update metrics with new audio properties
+            if resample_metrics['resampled']:
+                # Re-measure the resampled audio
+                resampled_metrics = measure_audio_metrics(resampled_audio)
+                audio_metrics['resampled_size_bytes'] = resampled_metrics['size_bytes']
+                audio_metrics['resampled_size_kb'] = resampled_metrics['size_kb']
+                # Keep original duration since resampling doesn't change it
+                audio_metrics['duration_seconds'] = audio_metrics.get('duration_seconds', resampled_metrics.get('duration_seconds'))
+
+            # Encode audio (track encoding time) - use resampled audio
             encoding_start = time.time()
-            encoded_audio_string = base64.b64encode(audio_data).decode("utf-8")
+            encoded_audio_string = base64.b64encode(resampled_audio).decode("utf-8")
             encoding_time = time.time() - encoding_start
             
             # Add metrics to audio_metrics dict
@@ -503,8 +646,14 @@ def main():
             audio_metrics['start_time'] = processing_start
             
             # Log audio metrics
-            logger.info(f"Audio metrics: Size={audio_metrics['size_kb']:.1f}KB, "
+            size_info = f"{audio_metrics['size_kb']:.1f}KB"
+            if audio_metrics.get('resampled'):
+                size_info = f"{audio_metrics['size_kb']:.1f}KB → {audio_metrics.get('resampled_size_kb', 0):.1f}KB"
+
+            logger.info(f"Audio metrics: Size={size_info}, "
                        f"Duration={audio_metrics['duration_seconds']:.1f}s, "
+                       f"Sample Rate={audio_metrics.get('original_sample_rate', 'unknown')} Hz → {TARGET_SAMPLE_RATE} Hz, "
+                       f"Resample time={audio_metrics.get('resample_time', 0):.3f}s, "
                        f"Encoding time={encoding_time:.3f}s")
             
             # Build messages with context
@@ -537,9 +686,20 @@ def main():
             current_segment = len(st.session_state.transcription_segments) + 1
             
             # Show audio info
+            audio_info = f"📊 Audio: {audio_metrics['size_kb']:.1f}KB"
+            if audio_metrics.get('resampled'):
+                audio_info += f" → {audio_metrics.get('resampled_size_kb', 0):.1f}KB (resampled)"
+            audio_info += f", {audio_metrics['duration_seconds']:.1f}s"
+            if audio_metrics.get('original_sample_rate'):
+                audio_info += f"\n🎵 Sample Rate: {audio_metrics['original_sample_rate']} Hz → {TARGET_SAMPLE_RATE} Hz"
+            if audio_metrics.get('converted_to_mono'):
+                audio_info += f" (stereo → mono)"
+            if audio_metrics.get('backend'):
+                audio_info += f"\n⚙️ Backend: {audio_metrics['backend']}"
+
             st.info(f"🎯 Processing Segment #{current_segment}\n"
-                   f"📊 Audio: {audio_metrics['size_kb']:.1f}KB, {audio_metrics['duration_seconds']:.1f}s" + 
-                   (f"\n📝 Context: {len(st.session_state.transcription_segments)} previous segments" 
+                   f"{audio_info}" +
+                   (f"\n📝 Context: {len(st.session_state.transcription_segments)} previous segments"
                     if st.session_state.transcription_segments else ""))
             
             try:

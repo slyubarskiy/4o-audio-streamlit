@@ -37,6 +37,11 @@ class TranscriptionMetrics:
     cached_response: bool = False
     context_segments_used: int = 0
     response_length: int = 0
+    original_sample_rate: Optional[int] = None
+    target_sample_rate: Optional[int] = None
+    resampled: bool = False
+    resample_time: float = 0.0
+    resampled_size_bytes: Optional[int] = None
     
     def to_dict(self) -> Dict:
         return asdict(self)

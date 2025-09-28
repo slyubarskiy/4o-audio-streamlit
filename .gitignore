@@ -37,3 +37,11 @@ wheels/
 .DS_Store
 Thumbs.db
 EOF
+
+# Inner kitchen
+.archive/
+.internal/
+.scratch/
+.internal_docs/
+.claude/
+CLAUDE.md
