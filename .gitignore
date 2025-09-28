@@ -1,6 +1,9 @@
 # Secrets
 .streamlit/secrets.toml
 .streamlit/_secrets.toml
+**/secrets.toml
+**/_secrets.toml
+**/.env
 .env
 *.env
 
@@ -47,3 +50,4 @@ EOF
 .internal_docs/
 .claude/
 CLAUDE.md
+**/CLAUDE.md
