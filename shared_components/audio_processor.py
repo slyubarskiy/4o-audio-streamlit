@@ -14,8 +14,8 @@ import soundfile as sf
 import librosa
 from typing import Tuple, Dict, Optional, Any
 
-import audio_config
-from audio_format_utils import detect_wav_format, preserve_format_params
+from shared_components import audio_config
+from shared_components import audio_format_utils
 
 logger = logging.getLogger(__name__)
 

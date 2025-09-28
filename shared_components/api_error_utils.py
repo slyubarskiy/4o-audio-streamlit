@@ -5,6 +5,9 @@ from typing import Callable, Any, Optional, Tuple, Type
 import requests
 import openai
 import logging
+import random
+import signal
+import threading
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -134,7 +137,6 @@ def api_retry(
                     
                     # Calculate next delay with exponential backoff
                     if jitter:
-                        import random
                         actual_delay = delay * (0.5 + random.random())
                     else:
                         actual_delay = delay
@@ -224,8 +226,6 @@ def with_timeout(timeout_seconds: float = 30.0):
     def decorator(func: Callable) -> Callable:
         @functools.wraps(func)
         def wrapper(*args, **kwargs) -> Any:
-            import signal
-            import threading
             
             result = [None]
             exception = [None]

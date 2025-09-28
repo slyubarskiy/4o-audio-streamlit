@@ -21,6 +21,9 @@ The GPT-4o Audio Transcription System is a production-ready Streamlit web applic
 
 ### 1.2 Core Capabilities
 - **Audio Processing**: Real-time audio recording and transcription via web interface
+- **Audio Resampling**: Automatic conversion to 16kHz mono for optimal API performance
+- **Format Preservation**: Intelligent handling of various WAV formats with quality retention
+- **Dual Backend Support**: FFmpeg (fast) or Librosa (fallback) audio processing
 - **Multi-segment Support**: Contextual transcription across multiple audio segments
 - **Consolidated Analysis**: Intelligent summarization and reorganization of complete conversations
 - **Language Detection**: Automatic language identification and transcription in source language
@@ -197,13 +200,19 @@ def handle_transcription_error(error: Exception, segment_num: int):
     Args: error - Exception instance
           segment_num - Failed segment number"""
 
+def process_audio_for_api(audio_data: bytes) -> Tuple[bytes, Dict[str, Any]]:
+    """Process audio with resampling for API compatibility
+    Converts to 16kHz mono WAV for optimal transcription performance
+    Args: audio_data - Raw audio bytes
+    Returns: (processed_audio, metrics_dict) with processing statistics"""
+
 def main():
     """Main application entry point with error boundaries"""
 ```
 
 **Dependencies**:
-- External: streamlit, openai, requests, jwt, dotenv
-- Internal: api_error_utils, api_metrics_logger, oauth_debug
+- External: streamlit, openai, requests, jwt, dotenv, librosa, soundfile, numpy
+- Internal: api_error_utils, api_metrics_logger, oauth_debug, audio_processor, audio_config, audio_format_utils
 
 **Configuration Requirements**:
 - GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET
@@ -363,6 +372,112 @@ def oauth_debug():
 - Email authorization verification
 - Common error solutions
 
+### 3.5 audio_processor.py - Audio Resampling and Processing
+**Purpose**: Audio processing utilities for converting audio to API-compatible format (16kHz mono WAV)
+
+**Key Functions**:
+```python
+def resample_audio_ffmpeg(
+    audio_data: bytes,
+    target_sr: int = 16000,
+    force_mono: bool = True
+) -> Tuple[bytes, Dict[str, Any]]:
+    """Resample audio using FFmpeg backend (fast)
+    Args: audio_data - Input audio bytes
+          target_sr - Target sample rate (default: 16000)
+          force_mono - Convert to mono (default: True)
+    Returns: (resampled_audio, metrics) with processing stats"""
+
+def resample_audio_librosa(
+    audio_data: bytes,
+    target_sr: int = 16000,
+    force_mono: bool = True
+) -> Tuple[bytes, Dict[str, Any]]:
+    """Resample audio using Librosa backend (fallback)
+    Args: audio_data - Input audio bytes
+          target_sr - Target sample rate
+          force_mono - Convert to mono
+    Returns: (resampled_audio, metrics) with quality metrics"""
+
+def resample_audio_auto(
+    audio_data: bytes,
+    backend: str = "auto"
+) -> Tuple[bytes, Dict[str, Any]]:
+    """Automatically select best backend for resampling
+    Tries FFmpeg first, falls back to Librosa if needed
+    Returns: (resampled_audio, metrics) including backend used"""
+```
+
+**Processing Features**:
+- Dual backend support (FFmpeg for speed, Librosa for compatibility)
+- Automatic format detection and preservation
+- High-quality resampling algorithms
+- Comprehensive metrics tracking
+- Error recovery with fallback
+
+### 3.6 audio_config.py - Audio Configuration Management
+**Purpose**: Centralized configuration for audio processing parameters
+
+**Key Components**:
+```python
+# Core Configuration
+TARGET_SAMPLE_RATE = 16000    # Optimal for GPT-4o audio
+FORCE_MONO = True             # Convert to mono for API
+DEFAULT_BACKEND = "ffmpeg"    # Primary processing backend
+
+def get_ffmpeg_quality_params() -> Dict[str, str]:
+    """Get optimized FFmpeg quality parameters
+    Returns: Dict with codec and quality settings"""
+
+def validate_backend(backend: str = None) -> str:
+    """Validate and select appropriate backend
+    Args: backend - Requested backend ("ffmpeg", "librosa", "auto")
+    Returns: Validated backend choice"""
+
+def get_backend_info() -> Dict[str, Any]:
+    """Get current backend capabilities and status
+    Returns: Backend information including availability"""
+```
+
+**Configuration Management**:
+- Backend selection and validation
+- Quality parameter optimization
+- Environment-based configuration
+- Performance tuning settings
+- Fallback strategies
+
+### 3.7 audio_format_utils.py - WAV Format Handling
+**Purpose**: Utilities for detecting and preserving audio format characteristics
+
+**Key Functions**:
+```python
+def detect_wav_format(audio_data: bytes) -> Dict[str, Any]:
+    """Detect WAV file format details
+    Analyzes: sample rate, channels, bit depth, subtype
+    Returns: Format dictionary with all parameters"""
+
+def get_soundfile_subtype(bit_depth: int, is_float: bool = False) -> str:
+    """Map bit depth to soundfile subtype
+    Args: bit_depth - Audio bit depth (16, 24, 32)
+          is_float - Whether format is floating point
+    Returns: Soundfile subtype string (e.g., 'PCM_16')"""
+
+def preserve_format_params(
+    audio_data: np.ndarray,
+    original_format: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Preserve original format characteristics
+    Maintains quality while ensuring API compatibility
+    Returns: Optimized format parameters"""
+```
+
+**Format Handling**:
+- Comprehensive WAV format detection
+- Bit depth preservation (16, 24, 32-bit)
+- Float vs integer format handling
+- Subtype mapping for soundfile
+- Quality retention strategies
+
 ---
 
 ## 4. File Boundaries
@@ -370,26 +485,102 @@ def oauth_debug():
 ### 4.1 Directory Structure
 ```
 4o-audio-streamlit/
-├── app.py                    # Main application (READ/WRITE: session state)
-├── api_error_utils.py        # Error utilities (READ-ONLY)
-├── api_metrics_logger.py     # Metrics tracking (READ/WRITE: session state)
-├── oauth_debug.py            # Debug utilities (READ-ONLY)
-├── requirements.txt          # Python dependencies
-├── render.yaml              # Deployment config
-├── .dockerfile              # Container definition
-├── .dockerignore           # Docker exclusions
-├── .gitignore              # Git exclusions
-├── .env                    # Local secrets (NEVER COMMIT)
-├── .streamlit/
-│   ├── config.toml         # Streamlit configuration
-│   └── secrets.toml        # Production secrets (NEVER COMMIT)
-├── docs/
-│   └── project_doc.md      # This documentation
-├── deploy/                 # Deployment artifacts
-└── __pycache__/           # Python bytecode (AUTO-GENERATED)
+├── v1-streamlit-app/           # Current production Streamlit application
+│   ├── app.py                  # Main application (READ/WRITE: session state)
+│   ├── oauth_debug.py          # Debug utilities (READ-ONLY)
+│   ├── requirements.txt        # Legacy dependencies reference
+│   ├── pyproject.toml          # UV package configuration
+│   ├── render.yaml             # Deployment config
+│   ├── .dockerfile             # Container definition
+│   ├── .dockerignore           # Docker exclusions
+│   ├── .env                    # Local secrets (NEVER COMMIT)
+│   ├── .streamlit/
+│   │   ├── config.toml         # Streamlit configuration
+│   │   └── secrets.toml        # Production secrets (NEVER COMMIT)
+│   └── deploy/                 # Deployment artifacts
+├── v2-fastapi-app/             # Future FastAPI implementation
+│   ├── pyproject.toml          # UV package configuration
+│   └── README.md               # Version-specific documentation
+├── shared_components/          # Shared business logic and utilities
+│   ├── __init__.py             # Package initialization
+│   ├── api_error_utils.py     # Error utilities (READ-ONLY)
+│   ├── api_metrics_logger.py  # Metrics tracking (READ/WRITE: session state)
+│   ├── audio_processor.py     # Audio resampling and processing
+│   ├── audio_config.py        # Audio configuration management
+│   ├── audio_format_utils.py  # WAV format handling utilities
+│   └── pyproject.toml          # UV package configuration
+├── docs-shared/                # Common documentation
+│   └── project_doc.md          # This documentation
+├── tests/                      # Test suites for all versions
+│   ├── v1-streamlit/           # Streamlit-specific tests
+│   ├── v2-fastapi/             # FastAPI-specific tests
+│   ├── shared/                 # Shared component tests
+│   ├── comparative/            # Version comparison tests
+│   └── performance/            # Performance benchmarks
+├── .internal/                  # Internal tools and benchmarks (GITIGNORED)
+│   ├── resampling_benchmarks/  # Audio processing performance tests
+│   │   ├── benchmark_resampling.py  # Comprehensive benchmark suite
+│   │   ├── quick_benchmark.py       # Quick performance check
+│   │   └── final_benchmark.py       # Production benchmarks
+│   └── resampling_test/        # Audio processing unit tests
+│       ├── test_resampling.py       # Core resampling tests
+│       ├── test_16k_mono.py         # 16kHz mono conversion tests
+│       ├── test_format_preservation.py  # Format preservation tests
+│       └── test_pcm16_conversion.py     # PCM16 conversion tests
+├── .scratch/                   # Exploratory scripts (GITIGNORED, auto-cleaned)
+├── .archive/                   # Backup files and legacy code (GITIGNORED)
+├── scripts/                    # Utility and migration scripts
+├── pyproject.toml              # UV workspace configuration
+├── README.md                   # Repository overview
+├── CLAUDE.md                   # AI assistant instructions
+├── .gitignore                  # Git exclusions
+└── __pycache__/                # Python bytecode (AUTO-GENERATED)
 ```
 
-### 4.2 Safe Zones (Read/Write Permitted)
+### 4.2 Special-Purpose Directories
+
+#### 4.2.1 .internal/ Directory
+**Purpose**: Long-lived helper scripts, maintenance tools, and development utilities
+
+**Structure**:
+```
+.internal/
+├── resampling_benchmarks/     # Performance testing tools
+│   ├── benchmark_resampling.py    # Comprehensive performance analysis
+│   ├── quick_benchmark.py         # Quick performance validation
+│   └── final_benchmark.py         # Production benchmark suite
+└── resampling_test/           # Unit and integration tests
+    ├── test_resampling.py         # Core functionality tests
+    ├── test_16k_mono.py           # Sample rate/channel tests
+    ├── test_format_preservation.py # Format handling tests
+    └── test_pcm16_conversion.py   # Bit depth conversion tests
+```
+
+**Usage Guidelines**:
+- Always gitignored to keep repository clean
+- Contains development and testing tools
+- Outputs should go to `.internal/output/` or `.internal/logs/`
+- Maintained for long-term use unlike `.scratch/`
+
+#### 4.2.2 .scratch/ Directory
+**Purpose**: Temporary exploratory and profiling scripts
+
+**Characteristics**:
+- Always gitignored
+- Auto-cleaned after 30 days
+- For quick experiments and discovery
+- Not for production or long-term storage
+
+#### 4.2.3 .archive/ Directory
+**Purpose**: Backup files and legacy code versions
+
+**Contents**:
+- Compressed application backups
+- BFG tool for repository cleaning
+- Historical code versions for reference
+- Legacy implementations
+
+### 4.3 Safe Zones (Read/Write Permitted)
 ```python
 # Session State (In-Memory)
 st.session_state.*           # All session variables
@@ -897,6 +1088,134 @@ jobs:
         run: pytest --cov=. --cov-fail-under=80
       - name: Upload coverage
         uses: codecov/codecov-action@v2
+```
+
+### 7.7 Audio Processing Tests
+**Location**: `.internal/resampling_test/`
+
+**Test Suite Components**:
+```python
+# test_resampling.py - Core resampling functionality
+def test_ffmpeg_resampling():
+    """Test FFmpeg backend resampling to 16kHz mono"""
+def test_librosa_resampling():
+    """Test Librosa backend resampling"""
+def test_backend_fallback():
+    """Test automatic fallback from FFmpeg to Librosa"""
+
+# test_16k_mono.py - Target format validation
+def test_16khz_conversion():
+    """Verify conversion to 16kHz sample rate"""
+def test_mono_conversion():
+    """Verify stereo to mono channel reduction"""
+def test_already_16k_mono():
+    """Test handling of already correct format"""
+
+# test_format_preservation.py - Quality retention
+def test_bit_depth_preservation():
+    """Test preservation of original bit depth"""
+def test_float_format_handling():
+    """Test handling of float32 audio formats"""
+def test_metadata_preservation():
+    """Test preservation of audio metadata"""
+
+# test_pcm16_conversion.py - Format conversion
+def test_24bit_to_16bit():
+    """Test conversion from 24-bit to 16-bit PCM"""
+def test_32bit_float_to_pcm16():
+    """Test conversion from 32-bit float to PCM16"""
+def test_quality_metrics():
+    """Validate audio quality after conversion"""
+
+# test_float_debug.py - Float format edge cases
+def test_float32_edge_cases():
+    """Test handling of float32 boundary values"""
+def test_nan_inf_handling():
+    """Test handling of NaN and Inf in float audio"""
+
+# test_subtype_case.py - Soundfile subtype handling
+def test_subtype_mapping():
+    """Test correct subtype selection for bit depths"""
+def test_case_sensitivity():
+    """Test handling of subtype case variations"""
+```
+
+**Testing Approach**:
+- Unit tests for each processing function
+- Integration tests for full pipeline
+- Performance benchmarks for optimization
+- Edge case validation
+- Format compatibility matrix
+
+### 7.8 Performance Benchmarking
+**Location**: `.internal/resampling_benchmarks/`
+
+**Benchmarking Tools**:
+
+#### benchmark_resampling.py
+**Purpose**: Comprehensive performance analysis of audio processing backends
+
+**Key Metrics**:
+```python
+def benchmark_ffmpeg_performance():
+    """Measure FFmpeg processing speed and resource usage
+    Metrics: processing_time, memory_usage, cpu_usage"""
+
+def benchmark_librosa_performance():
+    """Measure Librosa processing speed and quality
+    Metrics: processing_time, quality_score, memory_usage"""
+
+def compare_backends():
+    """Direct comparison of FFmpeg vs Librosa
+    Returns: performance_ratio, quality_difference, recommendation"""
+```
+
+**Benchmark Categories**:
+- **Speed Tests**: Processing time for various file sizes
+- **Quality Analysis**: SNR, THD, frequency response
+- **Resource Usage**: Memory and CPU consumption
+- **Scalability**: Performance with concurrent processing
+
+#### quick_benchmark.py
+**Purpose**: Rapid validation of processing performance
+
+**Quick Checks**:
+- Basic resampling speed (< 100ms target)
+- Memory usage validation (< 50MB peak)
+- Format compatibility check
+- Error recovery validation
+
+#### final_benchmark.py
+**Purpose**: Production-ready comprehensive benchmarks
+
+**Production Metrics**:
+```python
+# Performance Targets
+TARGETS = {
+    'ffmpeg_1mb_audio': 50,    # ms
+    'librosa_1mb_audio': 200,  # ms
+    'memory_peak': 100,         # MB
+    'quality_score': 0.95       # Min acceptable
+}
+
+def validate_production_readiness():
+    """Ensure all performance targets are met
+    Runs full benchmark suite against targets"""
+```
+
+**Benchmark Results Format**:
+```json
+{
+    "backend": "ffmpeg",
+    "audio_size_mb": 1.5,
+    "processing_time_ms": 45,
+    "memory_peak_mb": 32,
+    "quality_metrics": {
+        "snr_db": 58.3,
+        "thd_percent": 0.02
+    },
+    "timestamp": "2024-09-27T23:13:00Z"
+}
 ```
 
 ---

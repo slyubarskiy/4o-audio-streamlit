@@ -218,7 +218,7 @@ def resample_audio(audio_data: bytes, target_sr: int = TARGET_SAMPLE_RATE, force
 def get_redirect_uri():
     """Get appropriate redirect URI for current environment"""
     if 'localhost' in CONFIG['APP_DOMAIN']:
-        return "http://localhost:8501"
+        return "http://localhost:8080"
     else:
         return f"https://{CONFIG['APP_DOMAIN']}"
 
