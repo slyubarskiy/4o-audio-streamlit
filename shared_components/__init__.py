@@ -5,7 +5,7 @@ This package contains reusable utilities and business logic components
 that are shared between v1 (Streamlit) and v2 (FastAPI) implementations.
 """
 
-from api_error_utils import (
+from .api_error_utils import (
     APIError,
     RetryableError,
     NonRetryableError,
@@ -18,7 +18,7 @@ from api_error_utils import (
     batch_api_call,
 )
 
-from api_metrics_logger import (
+from .api_metrics_logger import (
     TranscriptionMetrics,
     APIMetricsLogger,
     measure_audio_metrics,
@@ -27,19 +27,19 @@ from api_metrics_logger import (
     create_performance_report,
 )
 
-from audio_config import (
+from .audio_config import (
     get_ffmpeg_quality_params,
     validate_backend,
     get_backend_info,
 )
 
-from audio_format_utils import (
+from .audio_format_utils import (
     detect_wav_format,
     get_soundfile_subtype,
     preserve_format_params,
 )
 
-from audio_processor import (
+from .audio_processor import (
     resample_audio_ffmpeg,
     resample_audio_librosa,
     resample_audio_auto,
