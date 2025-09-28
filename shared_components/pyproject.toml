@@ -1,5 +1,5 @@
 [project]
-name = "shared-components"
+name = "shared_components"
 version = "0.1.0"
 description = "Shared components for GPT-4o Audio Transcription System"
 readme = "README.md"

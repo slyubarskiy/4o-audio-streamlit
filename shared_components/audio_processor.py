@@ -15,7 +15,7 @@ import librosa
 from typing import Tuple, Dict, Optional, Any
 
 from shared_components import audio_config
-from shared_components import audio_format_utils
+from shared_components.audio_format_utils import detect_wav_format
 
 logger = logging.getLogger(__name__)
 

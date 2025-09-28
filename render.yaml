@@ -1,9 +1,8 @@
 services:
   - type: web
     name: transcription-app
-    env: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: streamlit run app.py
+    env: docker
+    dockerfilePath: ./Dockerfile
     envVars:
       - key: GOOGLE_CLIENT_ID
         sync: false
@@ -16,4 +15,4 @@ services:
       - key: AUTHORIZED_EMAIL
         value: sergeyly@gmail.com
       - key: APP_DOMAIN
-        value: your-app-name.onrender.com
+        value: fouro-audio-streamlit.onrender.com

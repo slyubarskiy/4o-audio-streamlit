@@ -13,6 +13,8 @@ from dataclasses import dataclass, asdict
 import pandas as pd
 import io
 import base64
+import wave
+import io
 
 logger = logging.getLogger(__name__)
 
@@ -255,8 +257,6 @@ class APIMetricsLogger:
 
 def measure_audio_metrics(audio_data: bytes) -> Dict[str, Any]:
     """Measure audio file metrics"""
-    import wave
-    import io
     
     metrics = {
         'size_bytes': len(audio_data),

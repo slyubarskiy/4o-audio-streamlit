@@ -5,6 +5,7 @@ Centralizes audio processing settings and backend selection
 
 import os
 import logging
+import subprocess
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +81,6 @@ def validate_backend(backend: str = None) -> str:
 
     if backend == "ffmpeg":
         # Check if ffmpeg is available
-        import subprocess
         try:
             result = subprocess.run(
                 [FFMPEG_PATH, "-version"],

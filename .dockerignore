@@ -1,0 +1,57 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info
+.venv/
+
+# IDE
+.vscode/
+.idea/
+
+# Secrets
+.env
+*.env
+**/.env
+**/secrets.toml
+**/_secrets.toml
+
+# Documentation
+*.md
+docs/
+docs-shared/
+
+# Testing and development
+tests/
+.internal/
+.scratch/
+.archive/
+.internal_docs/
+benchmark_*.py
+test_*.py
+quick_*.py
+simple_*.py
+final_*.py
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# UV/Package management
+uv.lock
+.uv/
+
+# Render-specific (not needed in Docker)
+v1-streamlit-app/render.yaml
+v1-streamlit-app/.dockerfile
+v1-streamlit-app/.dockerignore
