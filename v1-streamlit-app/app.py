@@ -15,19 +15,25 @@ import numpy as np
 import soundfile as sf
 import librosa
 
+# Import shared components
+import sys
+import os
+# Add shared_components directory to path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 # Import audio processing configuration and functions
-import audio_config
-from audio_processor import resample_audio_auto
+from shared_components import audio_config
+from shared_components.audio_processor import resample_audio_auto
 
 # Import the error handling utilities
-from api_error_utils import (
+from shared_components.api_error_utils import (
     api_retry, circuit_breaker, with_timeout,
     cache_on_error, validate_response, APIError
 )
 
 # Import metrics tracking
-from api_metrics_logger import (
-    APIMetricsLogger, TranscriptionMetrics, 
+from shared_components.api_metrics_logger import (
+    APIMetricsLogger, TranscriptionMetrics,
     measure_audio_metrics, log_token_usage,
     create_performance_report
 )

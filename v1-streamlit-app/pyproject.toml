@@ -1,0 +1,29 @@
+[project]
+name = "v1-streamlit-app"
+version = "1.0.0"
+description = "Streamlit GPT-4o Audio Transcription Application"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "streamlit",
+    "openai",
+    "python-dotenv",
+    "requests",
+    "PyJWT",
+    "watchdog",
+    "soundfile",
+    "librosa",
+    "resampy",
+    "numpy",
+    "ffmpeg-python",
+]
+
+[project.scripts]
+app = "app:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

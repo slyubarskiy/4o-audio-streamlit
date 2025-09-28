@@ -25,6 +25,8 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+.venv/
+uv.lock
 
 # IDE
 .vscode/

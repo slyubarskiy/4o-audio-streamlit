@@ -1,0 +1,16 @@
+[tool.uv.workspace]
+members = ["v1-streamlit-app", "v2-fastapi-app", "shared_components"]
+
+[tool.uv]
+constraint-dependencies = [
+    "openai>=1.0.0",
+    "streamlit>=1.0.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+]
